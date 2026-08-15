@@ -88,7 +88,8 @@ function requireSameOrigin(req: Request): Response | null {
 /** Turn an SDK failure into a response. Logs the shape, never the credential. */
 function sdkFailure(context: string, err: unknown): Response {
   const status = heyo.statusFor(err);
-  console.error(`[${context}] ${status}: ${heyo.describe(err)}`);
+  const kind = err instanceof Error ? err.name : typeof err;
+  console.error(`[${context}] → ${status} (${kind}): ${heyo.describe(err)}`);
   return httpError(status, heyo.describe(err));
 }
 
@@ -203,7 +204,7 @@ const server = Bun.serve({
         const auth = requireSession(req);
         if (auth instanceof Response) return auth;
         try {
-          return json({ networks: await heyo.listNetworks(auth.apiKey) });
+          return json(await heyo.listNetworks(auth.apiKey));
         } catch (err) {
           return sdkFailure("list-networks", err);
         }

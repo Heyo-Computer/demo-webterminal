@@ -15,6 +15,7 @@ import {
   NotFoundError,
   Sandbox,
   type DaemonInfo,
+  type NetworkInfo,
   type NetworkMember,
   type NetworkMemberKind,
   type ShellOptions,
@@ -58,11 +59,45 @@ export interface NetworkSummary {
   membersError: string | null;
 }
 
+export interface NetworkListing {
+  networks: NetworkSummary[];
+  /** Set when the list is incomplete but still usable. */
+  warning: string | null;
+}
+
 /** Cloud statuses that permit an interactive shell. */
 const CLOUD_SHELLABLE = new Set(["running"]);
 /** Daemon-native statuses that permit an interactive shell. `ready` is what
  * ephemeral backends report in place of `running`. */
 const DAEMON_SHELLABLE = new Set(["running", "ready"]);
+
+/**
+ * Daemon round-trips get a much shorter leash than the SDK's 60s default.
+ * `GET /me/daemons/{id}/sandboxes` is not a database read — the cloud dials
+ * the daemon over iroh and proxies the call into it. A daemon that is powered
+ * off burns most of that default before the cloud gives up and answers 502,
+ * which would leave the picker spinning on an outcome we already know.
+ */
+const DAEMON_TIMEOUT_MS = 10_000;
+
+/**
+ * Why a daemon's VM list is missing, in terms the user can act on.
+ *
+ * The cloud answers 502 for a daemon it cannot dial, so echoing the gateway
+ * status verbatim would tell the user their *cloud* is broken when in fact
+ * their laptop's `heyvmd` simply isn't running.
+ */
+function daemonFailure(err: unknown, daemon: DaemonInfo): string {
+  if (err instanceof ApiError) {
+    if (err.status === 502) {
+      return `the cloud could not reach this daemon — is \`heyvmd\` running? (last heartbeat ${daemon.lastSeenAt})`;
+    }
+    if (err.status === 0) {
+      return `timed out after ${DAEMON_TIMEOUT_MS / 1000}s waiting for this daemon`;
+    }
+  }
+  return describe(err);
+}
 
 /**
  * Validate a key by making the cheapest authenticated call we have. Returns
@@ -126,18 +161,36 @@ export async function listVms(apiKey: string): Promise<VmListing> {
     });
   }
 
+  // Only dial daemons the cloud believes are up. Asking about a daemon that
+  // has already missed its heartbeats is a guaranteed 502 and a guaranteed
+  // wait, and the cloud has told us the answer for free.
+  const reachable = daemons.filter((d) => d.status === "online");
+  for (const daemon of daemons) {
+    if (daemon.status === "online") continue;
+    warnings.push({
+      source: daemon.id,
+      sourceLabel: daemon.name ?? daemon.id,
+      message:
+        daemon.status === "offline"
+          ? "daemon is offline — start `heyvmd` on that machine to list its VMs"
+          : `daemon has missed its heartbeats (last seen ${daemon.lastSeenAt})`,
+    });
+  }
+
   const daemonListings = await Promise.allSettled(
-    daemons.map((d) => Daemons.listSandboxes(d.id, { apiKey })),
+    reachable.map((d) =>
+      Daemons.listSandboxes(d.id, { apiKey, timeoutMs: DAEMON_TIMEOUT_MS }),
+    ),
   );
 
   daemonListings.forEach((result, i) => {
-    const daemon = daemons[i]!;
+    const daemon = reachable[i]!;
     const label = daemon.name ?? daemon.id;
     if (result.status === "rejected") {
       warnings.push({
         source: daemon.id,
         sourceLabel: label,
-        message: `${describe(result.reason)} (daemon is ${daemon.status})`,
+        message: daemonFailure(result.reason, daemon),
       });
       return;
     }
@@ -161,8 +214,31 @@ export async function listVms(apiKey: string): Promise<VmListing> {
 }
 
 /** Networks with their member lists, for the picker's membership badges. */
-export async function listNetworks(apiKey: string): Promise<NetworkSummary[]> {
-  const infos = await Network.list({ apiKey });
+export async function listNetworks(apiKey: string): Promise<NetworkListing> {
+  // `GET /networks` returns the rows that already exist and nothing more. It
+  // is `GET /networks/me` that creates the account's default network on first
+  // read, so touch that first — otherwise an account that has never used
+  // networks gets an empty picker and no way to register anything.
+  let fallback: NetworkInfo | null = null;
+  try {
+    fallback = (await Network.default({ apiKey })).info();
+  } catch {
+    // Non-fatal: the listing below is the real source of truth.
+  }
+
+  let infos: NetworkInfo[];
+  let warning: string | null = null;
+  try {
+    infos = await Network.list({ apiKey });
+  } catch (err) {
+    // A failed listing shouldn't blank the screen when we already hold a
+    // usable network — degrade to the default and say what's missing.
+    if (!fallback) throw err;
+    infos = [fallback];
+    warning = `Showing the default network only — listing the rest failed: ${describe(err)}`;
+  }
+  if (infos.length === 0 && fallback) infos = [fallback];
+
   const summaries = await Promise.allSettled(
     infos.map(async (info) => {
       const net = await Network.get(info.id, { apiKey });
@@ -170,7 +246,7 @@ export async function listNetworks(apiKey: string): Promise<NetworkSummary[]> {
     }),
   );
 
-  return infos.map((info, i) => {
+  const networks = infos.map((info, i) => {
     const result = summaries[i]!;
     return {
       id: info.id,
@@ -182,6 +258,8 @@ export async function listNetworks(apiKey: string): Promise<NetworkSummary[]> {
         result.status === "rejected" ? describe(result.reason) : null,
     };
   });
+
+  return { networks, warning };
 }
 
 /**
@@ -226,7 +304,12 @@ export function statusFor(err: unknown): number {
   if (err instanceof AuthenticationError) return 401;
   if (err instanceof NotFoundError) return 404;
   if (err instanceof InvalidArgumentError) return 400;
-  if (err instanceof ApiError) return err.status >= 400 ? err.status : 502;
+  if (err instanceof ApiError) {
+    // The SDK uses status 0 for "no response at all" — a socket error or a
+    // client-side timeout. That's a gateway *timeout*, not a bad gateway.
+    if (err.status === 0) return 504;
+    return err.status >= 400 ? err.status : 502;
+  }
   return 500;
 }
 

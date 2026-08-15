@@ -180,6 +180,7 @@ function Picker({
   const [vms, setVms] = useState<Vm[]>([]);
   const [warnings, setWarnings] = useState<SourceWarning[]>([]);
   const [nets, setNets] = useState<Net[]>([]);
+  const [netWarning, setNetWarning] = useState<string | null>(null);
   const [netId, setNetId] = useState<string | null>(null);
   const [vmId, setVmId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -193,10 +194,11 @@ function Picker({
     try {
       const [vmRes, netRes] = await Promise.all([
         api<{ vms: Vm[]; warnings: SourceWarning[] }>("/api/vms"),
-        api<{ networks: Net[] }>("/api/networks"),
+        api<{ networks: Net[]; warning: string | null }>("/api/networks"),
       ]);
       setVms(vmRes.vms);
       setWarnings(vmRes.warnings);
+      setNetWarning(netRes.warning);
       setNets(netRes.networks);
       setNetId((cur) =>
         cur && netRes.networks.some((n) => n.id === cur)
@@ -295,6 +297,10 @@ function Picker({
               </li>
             ))}
           </ul>
+          {!loading && nets.length === 0 && (
+            <p className="muted">No networks on this account.</p>
+          )}
+          {netWarning && <p className="warn">{netWarning}</p>}
         </section>
 
         <section>

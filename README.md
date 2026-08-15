@@ -66,16 +66,35 @@ key like this:
 | `POST /api/session` | Exchange `{ apiKey }` for a session cookie |
 | `DELETE /api/session` | Log out: kill shells, forget the key |
 | `GET /api/vms` | Cloud + daemon-hosted VMs, with per-source warnings |
-| `GET /api/networks` | Networks with their member lists |
+| `GET /api/networks` | Networks with their member lists, plus a `warning` when the list is partial |
 | `POST /api/networks/:id/members` | Register `{ vmId }` into a network |
 | `GET /ws/shell?vm=…&cols=…&rows=…` | PTY stream (binary = bytes, text = control JSON) |
 
 The WebSocket carries keystrokes as **binary** frames and control messages
 (`{type:"resize"}`) as **text**, so the two can never be confused.
 
+## When a source is unavailable
+
+Neither column is all-or-nothing — a source that can't be reached becomes a
+warning next to the ones that can.
+
+- **A daemon shows "offline".** `GET /me/daemons/{id}/sandboxes` isn't a
+  database read: the cloud dials your machine over iroh and proxies the call
+  into `heyvmd`. If `heyvmd` isn't running the cloud answers **502 Bad
+  Gateway** — the gateway in question is your laptop, not the Heyo cloud.
+  Start `heyvmd` and hit Refresh. Daemons the cloud already reports as
+  `offline` or `stale` aren't dialed at all, so one sleeping machine never
+  stalls the picker.
+- **Networks are empty.** `GET /networks` lists existing rows and creates
+  nothing; it's `GET /networks/me` that creates the account default. The server
+  touches that first, so the picker always has at least one network.
+- **The cloud itself is unreachable.** Cloud and daemon listings settle
+  independently, so daemon VMs still render when the cloud is down, and vice
+  versa.
+
 ## Tests
 
 ```bash
-bun test        # session vault + HTTP helpers
+bun test        # session vault, HTTP helpers, SDK wrappers
 bun run typecheck
 ```
