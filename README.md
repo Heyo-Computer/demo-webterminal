@@ -18,6 +18,13 @@ bun run dev          # http://localhost:3000
 3. **Shell** — open a real PTY. `cd`, env changes, `vim`, `top`, and window
    resizing all behave normally.
 
+Cloud and daemon VMs stream from different endpoints. `sandbox.shell()` always
+targets `/deployed-sandboxes/{id}/shell-stream`, which only resolves deployed
+ids — pointing it at a daemon-native `sb-…` gets the socket closed before the
+`ready` frame. `src/heyo.ts` looks the VM up in the session's own listing and
+routes daemon VMs to `/me/daemons/{daemonId}/sandboxes/{id}/shell-stream`
+instead.
+
 ## How the key is handled
 
 The Heyo SDK's `ShellSession` puts its bearer token in the **WebSocket query

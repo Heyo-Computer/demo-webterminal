@@ -129,11 +129,41 @@ describe("isSameOrigin", () => {
     expect(isSameOrigin(r)).toBe(false);
   });
 
-  test("rejects an http Origin when the request came in over TLS", () => {
+  test("compares the host only, not the scheme", () => {
+    // A TLS-terminating proxy hands us plain HTTP while the browser sends the
+    // https Origin it really used. Reconstructing our own scheme to compare
+    // against would 403 every guarded route; the browser is what makes Origin
+    // unforgeable, so the host match is the security property.
     const r = req("http://app.example.com/api/session", {
       host: "app.example.com",
       "x-forwarded-proto": "https",
       origin: "http://app.example.com",
+    });
+    expect(isSameOrigin(r)).toBe(true);
+  });
+
+  test("prefers X-Forwarded-Host over a proxy-rewritten Host", () => {
+    const r = req("http://internal-svc:8080/api/session", {
+      host: "internal-svc:8080",
+      "x-forwarded-host": "app.example.com",
+      origin: "https://app.example.com",
+    });
+    expect(isSameOrigin(r)).toBe(true);
+  });
+
+  test("rejects the opaque `null` Origin", () => {
+    // What a sandboxed iframe or a redirected cross-site POST sends.
+    const r = req("http://localhost:3000/api/session", {
+      host: "localhost:3000",
+      origin: "null",
+    });
+    expect(isSameOrigin(r)).toBe(false);
+  });
+
+  test("rejects an unparseable Origin", () => {
+    const r = req("http://localhost:3000/api/session", {
+      host: "localhost:3000",
+      origin: "not-a-url",
     });
     expect(isSameOrigin(r)).toBe(false);
   });

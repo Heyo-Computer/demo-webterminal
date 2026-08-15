@@ -34,6 +34,12 @@ const state = {
   defaultNetwork: null as unknown,
   defaultNetworkError: null as unknown,
   members: [] as unknown[],
+  cloudShell: null as { id: string; options: unknown } | null,
+  daemonShell: null as
+    | { sandboxId: string; options: { pathOverride?: string } }
+    | null,
+  daemonShellOpened: false,
+  clientOptions: null as unknown,
 };
 
 function cloudSandbox(id: string, status = "running") {
@@ -68,6 +74,26 @@ mock.module("@heyocomputer/sdk", () => ({
       if (state.sandboxError) throw state.sandboxError;
       return state.sandboxes;
     },
+    connect: (id: string) => ({
+      shell: async (options: unknown) => {
+        state.cloudShell = { id, options };
+        return { via: "cloud" };
+      },
+    }),
+  },
+  HeyoClient: class {
+    constructor(opts: unknown) {
+      state.clientOptions = opts;
+    }
+  },
+  ShellSession: class {
+    via = "daemon";
+    constructor(_client: unknown, sandboxId: string, options: { pathOverride?: string }) {
+      state.daemonShell = { sandboxId, options };
+    }
+    async open() {
+      state.daemonShellOpened = true;
+    }
   },
   Daemons: {
     list: async () => state.daemons,
@@ -114,6 +140,63 @@ beforeEach(() => {
   state.defaultNetwork = networkInfo("net-default", true);
   state.defaultNetworkError = null;
   state.members = [];
+  state.cloudShell = null;
+  state.daemonShell = null;
+  state.daemonShellOpened = false;
+  state.clientOptions = null;
+});
+
+describe("openShell", () => {
+  test("a cloud VM streams from the deployed-sandbox endpoint", async () => {
+    state.sandboxes = [cloudSandbox("dep-1")];
+
+    await heyo.openShell(KEY, "dep-1", { cols: 100, rows: 30 });
+
+    expect(state.cloudShell).toEqual({
+      id: "dep-1",
+      options: { cols: 100, rows: 30 },
+    });
+    expect(state.daemonShell).toBeNull();
+  });
+
+  test("a daemon-native VM streams from its daemon's endpoint", async () => {
+    // `/deployed-sandboxes/{id}/shell-stream` cannot resolve an `sb-…` id —
+    // the cloud closes the socket before `ready`. This is that regression.
+    state.daemons = [daemon("hd-1")];
+    state.daemonSandboxes.set("hd-1", {
+      daemonId: "hd-1",
+      daemonName: "box-hd-1",
+      sandboxes: [
+        {
+          id: "sb-31782662",
+          name: "test-apple",
+          status: "running",
+          image: "ubuntu-24.04",
+          isDeployed: false,
+        },
+      ],
+    });
+
+    await heyo.openShell(KEY, "sb-31782662", { cols: 80, rows: 24 });
+
+    expect(state.cloudShell).toBeNull();
+    expect(state.daemonShellOpened).toBe(true);
+    expect(state.daemonShell!.options.pathOverride).toBe(
+      "/me/daemons/hd-1/sandboxes/sb-31782662/shell-stream",
+    );
+    // The caller's sizing survives the path rewrite.
+    expect(state.daemonShell!.options).toMatchObject({ cols: 80, rows: 24 });
+  });
+
+  test("a VM this session cannot see is a 404, not a shell", async () => {
+    state.sandboxes = [cloudSandbox("dep-1")];
+
+    await expect(heyo.openShell(KEY, "dep-someone-elses", {})).rejects.toThrow(
+      /No VM dep-someone-elses is visible to this session/,
+    );
+    expect(state.cloudShell).toBeNull();
+    expect(state.daemonShell).toBeNull();
+  });
 });
 
 describe("listVms", () => {

@@ -9,11 +9,14 @@
 import {
   ApiError,
   AuthenticationError,
+  ConnectionError,
   Daemons,
+  HeyoClient,
   InvalidArgumentError,
   Network,
   NotFoundError,
   Sandbox,
+  ShellSession,
   type DaemonInfo,
   type NetworkInfo,
   type NetworkMember,
@@ -290,13 +293,53 @@ export async function addVmToNetwork(
 /**
  * Open an interactive PTY on a VM. The returned `ShellSession` handles its own
  * reconnects inside the cloud's ~60s grace window.
+ *
+ * Which endpoint to stream from depends on where the VM lives, and the SDK
+ * does not decide that for you: `sandbox.shell()` always targets
+ * `/deployed-sandboxes/{id}/shell-stream`. That route only knows about
+ * cloud-deployed sandboxes, so pointing it at a daemon-native `sb-…` id gets
+ * the socket closed before the `ready` frame ever arrives. Daemon sandboxes
+ * have their own route, which the cloud proxies into `heyvmd` over iroh.
+ *
+ * As in `addVmToNetwork`, the VM is looked up in this session's own listing
+ * rather than trusted from the request — which doubles as the authorization
+ * check, since a VM this key cannot see is a 404.
  */
 export async function openShell(
   apiKey: string,
   vmId: string,
   options: ShellOptions,
-) {
-  return await Sandbox.connect(vmId, { apiKey }).shell(options);
+): Promise<ShellSession> {
+  const { vms } = await listVms(apiKey);
+  const vm = vms.find((v) => v.id === vmId);
+  if (!vm) {
+    throw new NotFoundError(`No VM ${vmId} is visible to this session`);
+  }
+
+  if (vm.source === "cloud") {
+    return await Sandbox.connect(vmId, { apiKey }).shell(options);
+  }
+
+  const session = new ShellSession(new HeyoClient({ apiKey }), vmId, {
+    ...options,
+    pathOverride:
+      `/me/daemons/${encodeURIComponent(vm.source)}` +
+      `/sandboxes/${encodeURIComponent(vmId)}/shell-stream`,
+  });
+  try {
+    await session.open();
+  } catch (err) {
+    // A rejected upgrade closes the socket before `ready`, and the SDK's own
+    // hint for that names the deployed-sandbox route — which is not the route
+    // we just used. Say what actually has to be true instead.
+    throw new ConnectionError(
+      `Could not open a shell on ${vm.name} through ${vm.sourceLabel}: ` +
+        `${describe(err)}. The daemon must be running, and the sandbox must be ` +
+        `exposed for remote access.`,
+      err,
+    );
+  }
+  return session;
 }
 
 /** Map an SDK error onto an HTTP status for our own responses. */
