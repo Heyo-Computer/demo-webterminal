@@ -1,0 +1,81 @@
+# Heyo Webterminal
+
+A browser terminal for Heyo VMs. Paste a heyvm API key, register a VM into one
+of your networks, and get an interactive PTY on it — all in the browser.
+
+```bash
+bun install
+bun run dev          # http://localhost:3000
+```
+
+## Flow
+
+1. **Key** — paste a `heyo_api_…` key. It is validated against the cloud before
+   anything is stored.
+2. **Pick** — choose a network and a VM, then register the VM into the network.
+   Both cloud-deployed sandboxes (`dep-…`) and sandboxes on your registered
+   daemons (`hd-…` machines) are listed.
+3. **Shell** — open a real PTY. `cd`, env changes, `vim`, `top`, and window
+   resizing all behave normally.
+
+## How the key is handled
+
+The Heyo SDK's `ShellSession` puts its bearer token in the **WebSocket query
+string** — a deliberate workaround, since browsers cannot set headers on a
+`WebSocket`. A browser talking straight to the cloud would therefore expose the
+key in devtools, the browser's own network log, and any intermediary's access
+log.
+
+So the browser never talks to the Heyo cloud. This server does, and holds the
+key like this:
+
+- **Memory only.** `src/sessions.ts` keeps keys in a module-private `Map`. There
+  is no file, no database, no env write. Restarting the process invalidates
+  every session by construction.
+- **Structurally unloggable.** The `Session` record passed around the app has no
+  `apiKey` field at all — keys live in a separate map only `getApiKey()` can
+  read. A stray `console.log(session)` cannot leak one.
+- **Never echoed.** No response body contains the key or anything derived from
+  it. After login the page holds no credential — just an `HttpOnly` cookie it
+  cannot read.
+- **Cookie-only auth.** Every `/api/*` route and the WebSocket upgrade resolve
+  the caller from the `hwt_sid` cookie. No route accepts a key in a header,
+  body, or query string, so one browser session can never see another's VMs.
+- **Expiring.** 30 min idle (refreshed per request), 8 h absolute. A sweeper
+  reaps expired sessions and kills their shells. Logging out does the same
+  immediately.
+- **CSRF-guarded.** `SameSite=Strict` plus an explicit `Origin`-equals-host
+  check on every state-changing request and on the WebSocket upgrade.
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `index.ts` | `Bun.serve` — routes, auth, and the WebSocket shell proxy |
+| `src/sessions.ts` | The credential vault: session lifecycle, TTLs, shell registry |
+| `src/http.ts` | Cookie handling, same-origin check, JSON helpers |
+| `src/heyo.ts` | Thin wrappers over `@heyocomputer/sdk` |
+| `public/app.tsx` | Key → picker → terminal screens |
+| `public/terminal.tsx` | xterm.js bound to `/ws/shell` |
+
+## API
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/session` | Is the current cookie still valid? |
+| `POST /api/session` | Exchange `{ apiKey }` for a session cookie |
+| `DELETE /api/session` | Log out: kill shells, forget the key |
+| `GET /api/vms` | Cloud + daemon-hosted VMs, with per-source warnings |
+| `GET /api/networks` | Networks with their member lists |
+| `POST /api/networks/:id/members` | Register `{ vmId }` into a network |
+| `GET /ws/shell?vm=…&cols=…&rows=…` | PTY stream (binary = bytes, text = control JSON) |
+
+The WebSocket carries keystrokes as **binary** frames and control messages
+(`{type:"resize"}`) as **text**, so the two can never be confused.
+
+## Tests
+
+```bash
+bun test        # session vault + HTTP helpers
+bun run typecheck
+```
