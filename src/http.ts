@@ -61,6 +61,17 @@ export function clearedSessionCookie(req: Request): string {
   return sessionCookie(req, "", 0);
 }
 
+/** The host this request was addressed to, as the browser sees it. Behind a
+ * proxy that rewrites `Host`, `X-Forwarded-Host` is the browser-visible one. */
+function requestHost(req: Request): string | null {
+  const forwarded = req.headers.get("x-forwarded-host");
+  if (forwarded) {
+    const first = forwarded.split(",")[0]!.trim();
+    if (first) return first;
+  }
+  return req.headers.get("host");
+}
+
 /**
  * CSRF guard. `SameSite=Strict` already blocks cross-site cookie carriage in
  * modern browsers; this is the belt to that suspenders, and it also covers the
@@ -68,15 +79,28 @@ export function clearedSessionCookie(req: Request): string {
  * browser versions).
  *
  * A missing `Origin` is rejected too: every browser sends one on the requests
- * this guards, so its absence means the caller isn't the app.
+ * this guards, so its absence means the caller isn't the app. `null` — what a
+ * sandboxed iframe or a redirected cross-site POST sends — is likewise not us.
+ *
+ * Only the *host* is compared, not the scheme. The security property comes from
+ * the browser: a page at another origin cannot forge `Origin`, whatever scheme
+ * it claims. Reconstructing our own scheme, by contrast, is guesswork the
+ * moment a TLS-terminating proxy sits in front of us — it hands us plain HTTP,
+ * so we'd expect `http://host` while the browser truthfully sends
+ * `https://host` and every guarded route 403s.
  */
 export function isSameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin");
-  if (!origin) return false;
-  const host = req.headers.get("host");
+  if (!origin || origin === "null") return false;
+  const host = requestHost(req);
   if (!host) return false;
-  const proto = isSecureRequest(req) ? "https" : "http";
-  return origin === `${proto}://${host}`;
+  let originHost: string;
+  try {
+    ({ host: originHost } = new URL(origin));
+  } catch {
+    return false;
+  }
+  return originHost !== "" && originHost === host;
 }
 
 export function json(data: unknown, init: ResponseInit = {}): Response {
