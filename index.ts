@@ -384,7 +384,7 @@ const server = Bun.serve({
     },
   },
 
-  development: {
+  development: Bun.env.NODE_ENV !== "production" && {
     hmr: true,
     console: true,
   },
