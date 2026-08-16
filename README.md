@@ -18,12 +18,33 @@ bun run dev          # http://localhost:3000
 3. **Shell** — open a real PTY. `cd`, env changes, `vim`, `top`, and window
    resizing all behave normally.
 
-Cloud and daemon VMs stream from different endpoints. `sandbox.shell()` always
-targets `/deployed-sandboxes/{id}/shell-stream`, which only resolves deployed
-ids — pointing it at a daemon-native `sb-…` gets the socket closed before the
-`ready` frame. `src/heyo.ts` looks the VM up in the session's own listing and
-routes daemon VMs to `/me/daemons/{daemonId}/sandboxes/{id}/shell-stream`
-instead.
+### Where a shell actually connects
+
+`sandbox.shell()` always targets `/deployed-sandboxes/{id}/shell-stream`, which
+only resolves cloud-deployed ids — point it at a daemon-native `sb-…` and the
+socket closes before the `ready` frame. `src/heyo.ts` looks the VM up in the
+session's own listing and picks the route from where it lives:
+
+| VM lives on | Route |
+| --- | --- |
+| The Heyo cloud | `/deployed-sandboxes/{id}/shell-stream` |
+| **This machine's daemon** | `heyvmd` on loopback, `/sandboxes/{id}/shell-stream` |
+| Another machine's daemon | `/me/daemons/{daemonId}/sandboxes/{id}/shell-stream` |
+
+The middle row is the same-host shortcut: when the daemon hosting a sandbox
+*is* this host, asking the cloud to tunnel back in buys nothing, so the server
+attaches to `heyvmd` directly. It is taken only when the loopback daemon's own
+`backendId` matches the daemon the VM was listed under — sandbox ids are short,
+and attaching to a same-named sandbox on another machine would be a real mix-up.
+
+Authorization is unaffected: the VM must appear in *this session's* cloud
+listing before any route is chosen, so a session still only reaches what its own
+key can see. If the local connect fails, the cloud route is tried next.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HEYO_LOCAL_DAEMON_URL` | `http://127.0.0.1:34099` | Where to look for a local `heyvmd` |
+| `HEYO_DISABLE_LOCAL_DAEMON` | unset | Set to `1` to always go through the cloud |
 
 ## How the key is handled
 

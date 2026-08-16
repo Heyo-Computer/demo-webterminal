@@ -13,6 +13,11 @@ import { ApiError, AuthenticationError, NotFoundError } from "@heyocomputer/sdk"
 
 const KEY = "heyo_api_test";
 
+// These cases exercise the cloud routes. The same-host shortcut is covered
+// separately; leaving it on here would make results depend on whether the
+// machine running the suite happens to have a `heyvmd` on loopback.
+process.env.HEYO_DISABLE_LOCAL_DAEMON = "1";
+
 interface StubDaemon {
   id: string;
   name: string | null;

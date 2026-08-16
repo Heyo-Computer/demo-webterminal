@@ -84,6 +84,56 @@ const DAEMON_SHELLABLE = new Set(["running", "ready"]);
 const DAEMON_TIMEOUT_MS = 10_000;
 
 /**
+ * The `heyvmd` running on this same machine, if there is one.
+ *
+ * A daemon sandbox is normally reached by asking the cloud to proxy into its
+ * daemon over iroh. When the daemon *is* this host that round trip buys
+ * nothing: `heyvmd` serves the same `/sandboxes/{id}/shell-stream` endpoint
+ * directly, unauthenticated, on loopback. The SDK ships `HeyoClient.local()`
+ * for exactly this case.
+ *
+ * We only take the shortcut when the local daemon's own id matches the one
+ * the VM was listed under — sandbox ids are short, and connecting to a
+ * same-named sandbox on a different machine would be a real mix-up.
+ */
+const LOCAL_PROBE_TTL_MS = 30_000;
+
+/** Read at call time, not module load, so tests and `bun --hot` can change it. */
+function localDaemonUrl(): string {
+  return Bun.env.HEYO_LOCAL_DAEMON_URL ?? "http://127.0.0.1:34099";
+}
+
+let localProbe: { id: string | null; at: number } | null = null;
+
+/** Forget the cached probe. For tests. */
+export function __resetLocalDaemonProbe(): void {
+  localProbe = null;
+}
+
+async function localDaemonId(): Promise<string | null> {
+  if (Bun.env.HEYO_DISABLE_LOCAL_DAEMON === "1") return null;
+  const now = Date.now();
+  if (localProbe && now - localProbe.at < LOCAL_PROBE_TTL_MS) {
+    return localProbe.id;
+  }
+  let id: string | null = null;
+  try {
+    const res = await fetch(`${localDaemonUrl()}/health`, {
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (res.ok) {
+      ({ backendId: id = null } = (await res.json()) as { backendId?: string });
+    }
+  } catch {
+    // No daemon here, or not answering. The cloud route is the fallback.
+  }
+  // Negative results are cached too, briefly, so a host with no daemon does
+  // not pay the probe on every connect.
+  localProbe = { id, at: now };
+  return id;
+}
+
+/**
  * Why a daemon's VM list is missing, in terms the user can act on.
  *
  * The cloud answers 502 for a daemon it cannot dial, so echoing the gateway
@@ -305,6 +355,26 @@ export async function addVmToNetwork(
  * rather than trusted from the request — which doubles as the authorization
  * check, since a VM this key cannot see is a 404.
  */
+/** Attach to a sandbox on this host, straight through `heyvmd`. */
+async function openLocalShell(
+  vmId: string,
+  options: ShellOptions,
+): Promise<ShellSession> {
+  const session = new ShellSession(
+    // `apiKey: ""` rather than `undefined`: the client falls back to
+    // `process.env.HEYO_API_KEY` on nullish, and a loopback daemon needs no
+    // credential at all. An empty string is falsy, so no header is sent.
+    new HeyoClient({ baseUrl: localDaemonUrl(), apiKey: "" }),
+    vmId,
+    {
+      ...options,
+      pathOverride: `/sandboxes/${encodeURIComponent(vmId)}/shell-stream`,
+    },
+  );
+  await session.open();
+  return session;
+}
+
 export async function openShell(
   apiKey: string,
   vmId: string,
@@ -318,6 +388,18 @@ export async function openShell(
 
   if (vm.source === "cloud") {
     return await Sandbox.connect(vmId, { apiKey }).shell(options);
+  }
+
+  if ((await localDaemonId()) === vm.source) {
+    try {
+      return await openLocalShell(vmId, options);
+    } catch (err) {
+      // Fall through to the cloud route rather than failing outright — the
+      // local daemon may have stopped between the probe and the connect.
+      console.warn(
+        `[shell] local daemon path failed for ${vmId}, trying the cloud: ${describe(err)}`,
+      );
+    }
   }
 
   const session = new ShellSession(new HeyoClient({ apiKey }), vmId, {
